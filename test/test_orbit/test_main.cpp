@@ -6,9 +6,11 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unity.h>
 
+#include "orbit_alert.h"
 #include "orbit_geo.h"
 #include "orbit_pass.h"
 #include "orbit_sgp4.h"
@@ -381,6 +383,80 @@ static void test_pass_prediction_reports_sgp4_failure() {
     TEST_ASSERT_EQUAL_INT(SGP4_ERR_ECCENTRICITY, err);
 }
 
+// ═══════════════════════════════════════════════════════
+//  Alert / schedule helpers
+// ═══════════════════════════════════════════════════════
+
+static Pass makePass(int64_t aos, int64_t los, bool visible, int64_t vs = 0, int64_t ve = 0) {
+    Pass p = {};
+    p.aos = aos;
+    p.tca = (aos + los) / 2;
+    p.los = los;
+    p.maxElDeg = 40.0f;
+    p.visible = visible;
+    p.visStart = vs;
+    p.visEnd = ve;
+    return p;
+}
+
+static void test_next_pass_index() {
+    Pass p[3] = {
+        makePass(1000, 1500, false),
+        makePass(7000, 7600, true, 7100, 7400),
+        makePass(13000, 13600, true, 13000, 13600),
+    };
+    TEST_ASSERT_EQUAL_INT(0, nextPassIndex(p, 3, 0, false));
+    TEST_ASSERT_EQUAL_INT(0, nextPassIndex(p, 3, 1499, false));
+    TEST_ASSERT_EQUAL_INT(1, nextPassIndex(p, 3, 1500, false));
+    TEST_ASSERT_EQUAL_INT(1, nextPassIndex(p, 3, 0, true));
+    TEST_ASSERT_EQUAL_INT(2, nextPassIndex(p, 3, 7400, true));   // visible part over
+    TEST_ASSERT_EQUAL_INT(-1, nextPassIndex(p, 3, 13600, true));
+    TEST_ASSERT_EQUAL_INT(-1, nextPassIndex(p, 0, 0, false));
+    TEST_ASSERT_EQUAL_INT(-1, nextPassIndex(nullptr, 3, 0, false));
+}
+
+static void test_pass_alert_window() {
+    Pass p[2] = {
+        makePass(1000, 1500, false),              // never alerts
+        makePass(7000, 7600, true, 7100, 7400),
+    };
+    PassAlert a = passAlert(p, 2, 1200, 300);
+    TEST_ASSERT_FALSE(a.active);                  // invisible pass in progress
+    a = passAlert(p, 2, 7100 - 301, 300);
+    TEST_ASSERT_FALSE(a.active);
+    a = passAlert(p, 2, 7100 - 300, 300);
+    TEST_ASSERT_TRUE(a.active);
+    TEST_ASSERT_FALSE(a.underway);
+    TEST_ASSERT_EQUAL_INT(1, a.index);
+    TEST_ASSERT_EQUAL_INT64(300, a.secondsToStart);
+    a = passAlert(p, 2, 7100, 300);
+    TEST_ASSERT_TRUE(a.active);
+    TEST_ASSERT_TRUE(a.underway);
+    a = passAlert(p, 2, 7399, 300);
+    TEST_ASSERT_TRUE(a.underway);
+    a = passAlert(p, 2, 7400, 300);
+    TEST_ASSERT_FALSE(a.active);
+}
+
+static void test_format_local_day_time() {
+    setenv("TZ", "AEST-10AEDT,M10.1.0,M4.1.0/3", 1);   // Melbourne (config.h)
+    tzset();
+    // 2026-11-01 09:00 UTC = 20:00 AEDT (UTC+11), a Sunday
+    const int64_t now = (int64_t)jdToUnix(julianDate(2026, 11, 1, 9, 0, 0.0));
+    char buf[24];
+    TEST_ASSERT_EQUAL_STRING("Today 20:42", formatLocalDayTime(now + 42 * 60, now, buf, sizeof(buf)));
+    // 4 h later is 00:00 Monday local
+    TEST_ASSERT_EQUAL_STRING("Tomorrow 00:00", formatLocalDayTime(now + 4 * 3600, now, buf, sizeof(buf)));
+    // Sun 20:00 + 2 days - 14h50m = Tue 05:10
+    TEST_ASSERT_EQUAL_STRING("Tue 05:10",
+                             formatLocalDayTime(now + 2 * 86400 - (14 * 3600 + 50 * 60), now, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("20:00", formatLocalTime(now, buf, sizeof(buf)));
+    // Tiny buffers are truncated, never overflowed
+    char small[6];
+    formatLocalDayTime(now, now, small, sizeof(small));
+    TEST_ASSERT_EQUAL_size_t(5, strlen(small));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_tle_parse_iss);
@@ -400,5 +476,8 @@ int main(int, char**) {
     RUN_TEST(test_pass_in_progress_is_clipped);
     RUN_TEST(test_pass_output_limit_and_empty_window);
     RUN_TEST(test_pass_prediction_reports_sgp4_failure);
+    RUN_TEST(test_next_pass_index);
+    RUN_TEST(test_pass_alert_window);
+    RUN_TEST(test_format_local_day_time);
     return UNITY_END();
 }
