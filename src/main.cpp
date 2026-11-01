@@ -532,9 +532,20 @@ void loop() {
         LOG_I("GT911 wake sequence complete — touch ready");
     }
 
+    // ─── Pass alert ───────────────────────────────────
+    // A visible ISS pass is imminent or underway: keep (or turn) the display
+    // on so the banner can be seen, even inside the sleep window.
+    bool passAlertActive = false;
+    if (appState.settings.passNotifyEnabled && appState.ntpSynced &&
+        appState.passes.status == PASS_STATUS_OK) {
+        orbit::PassAlert a = orbit::passAlert(appState.passes.passes, appState.passes.count,
+                                              (int64_t)time(nullptr), PASS_ALERT_LEAD_S);
+        passAlertActive = a.active;
+    }
+
     // ─── Display sleep management ─────────────────────
     if (appState.ntpSynced && appState.settings.sleepEnabled) {
-        bool shouldSleep = isInSleepWindow(appState.settings);
+        bool shouldSleep = isInSleepWindow(appState.settings) && !passAlertActive;
 
         if (shouldSleep && !appState.displayAsleep) {
             // Enter sleep after inactivity timeout
@@ -547,7 +558,7 @@ void loop() {
                       lastTouchActivity ? (now - lastTouchActivity) / 1000 : 0);
             }
         } else if (!shouldSleep && appState.displayAsleep) {
-            // Sleep window ended — wake up naturally
+            // Sleep window ended (or a pass alert started) — wake up
             appState.displayAsleep = false;
             appState.lastWakeTime = now;
             lastTouchActivity = now;
@@ -555,7 +566,7 @@ void loop() {
             screenResetTouch();
             screenForceRedraw();
             wakePhase = WAKE_RESETTING;
-            LOG_I("Display waking — sleep window ended");
+            LOG_I("Display waking — %s", passAlertActive ? "ISS pass alert" : "sleep window ended");
             return;
         }
 

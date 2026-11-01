@@ -2,6 +2,7 @@
 #include "../config.h"
 #include "../colors.h"
 #include "../settings.h"
+#include "../pass_text.h"
 #include <time.h>
 
 // ─── Layout ─────────────────────────────────────────────
@@ -120,7 +121,8 @@ static void drawSleepHoursRow(LGFX &lcd, const UserSettings &s, int y) {
     drawSectionDivider(lcd, y + ROW_H - 1);
 }
 
-static void drawPassNotifyRow(LGFX &lcd, const UserSettings &s, int y) {
+static void drawPassNotifyRow(LGFX &lcd, const AppState &state, int y) {
+    const UserSettings &s = state.settings;
     lcd.fillRect(0, y, DISPLAY_WIDTH, ROW_H, COL_BG);
 
     lcd.setTextColor(COL_TEXT_PRIMARY);
@@ -128,9 +130,12 @@ static void drawPassNotifyRow(LGFX &lcd, const UserSettings &s, int y) {
     lcd.setTextDatum(ML_DATUM);
     lcd.drawString("ISS Pass Alerts", ROW_PAD, y + ROW_H / 2 - 6);
 
+    // Subtitle: next visible pass (from the predictor) or a hint
+    char sub[64];
+    passShortText(state, time(nullptr), sub, sizeof(sub));
     lcd.setTextColor(COL_TEXT_DIM);
     lcd.setFont(&fonts::Font2);
-    lcd.drawString("Notify when ISS is visible", ROW_PAD, y + ROW_H / 2 + 14);
+    lcd.drawString(sub, ROW_PAD, y + ROW_H / 2 + 14);
 
     drawToggle(lcd, TOGGLE_X, y + (ROW_H - TOGGLE_H) / 2, s.passNotifyEnabled);
     drawSectionDivider(lcd, y + ROW_H - 1);
@@ -247,7 +252,7 @@ void renderSettingsScreen(LGFX &lcd, const AppState &state, bool fullRedraw) {
     // ─── Rows ────────────────────────────────────────
     drawSleepRow(lcd, state.settings, rowY(ROW_SLEEP));
     drawSleepHoursRow(lcd, state.settings, rowY(ROW_SLEEP_HOURS));
-    drawPassNotifyRow(lcd, state.settings, rowY(ROW_PASS_NOTIFY));
+    drawPassNotifyRow(lcd, state, rowY(ROW_PASS_NOTIFY));
     drawHomeRow(lcd, state.settings, rowY(ROW_HOME));
     drawAboutRow(lcd, state, rowY(ROW_ABOUT));
 

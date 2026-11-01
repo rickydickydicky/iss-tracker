@@ -6,7 +6,10 @@
 #include "stats_screen.h"
 #include "crew_screen.h"
 #include "settings_screen.h"
+#include "../pass_text.h"
 #include <Wire.h>
+#include <string.h>
+#include <time.h>
 
 // ─── Global LGFX Display Instance ───────────────────────
 static LGFX lcd;
@@ -39,6 +42,47 @@ static bool isDataStale(const AppState &state) {
     unsigned long now = millis();
     // Data is stale if last update was > 30 seconds ago
     return (now - state.lastPositionUpdate > 30000) || state.apiError;
+}
+
+// ─── Pass alert banner ──────────────────────────────────
+// Overlays the top of whichever screen is active while a visible pass is
+// imminent/underway. Stops short of the status dots in the top-right, and
+// above the ISS marker's reach on the map (ISS latitude <= 51.6 deg).
+static const int BANNER_W = DISPLAY_WIDTH - 50;
+static const int BANNER_H = 34;
+static bool bannerShown = false;
+static char lastBanner[96] = "";
+
+static void renderPassBanner(const AppState &state, bool fullRedraw) {
+    char text[96];
+    bool active = passAlertText(state, time(nullptr), text, sizeof(text));
+
+    if (!active) {
+        if (bannerShown) {
+            // Banner gone: repaint the screen underneath it
+            bannerShown = false;
+            lastBanner[0] = '\0';
+            needsFullRedraw = true;
+        }
+        return;
+    }
+
+    if (fullRedraw || !bannerShown || strcmp(text, lastBanner) != 0) {
+        lcd.fillRect(0, 0, BANNER_W, BANNER_H, COL_ALERT_BG);
+        strncpy(lastBanner, text, sizeof(lastBanner) - 1);
+        lastBanner[sizeof(lastBanner) - 1] = '\0';
+        if (!bannerShown) LOG_I("Pass alert: %s", text);
+        bannerShown = true;
+    }
+
+    // Repaint the text every frame (with background) so screens that redraw
+    // underneath can't leave it damaged. Same pixels each time: no flicker.
+    lcd.setFont(&fonts::Font4);
+    if (lcd.textWidth(text) > BANNER_W - 16) lcd.setFont(&fonts::Font2);
+    lcd.setTextColor(COL_ALERT_TEXT, COL_ALERT_BG);
+    lcd.setTextDatum(ML_DATUM);
+    lcd.drawString(text, 8, BANNER_H / 2);
+    lcd.setTextColor(COL_TEXT_PRIMARY);
 }
 
 // ─── Tab bar renderer (only on full redraw) ─────────────
@@ -290,6 +334,8 @@ void screenManagerRender(const AppState &state) {
         default:
             break;
     }
+
+    renderPassBanner(state, doFullRedraw);
 
     // ─── Tab Bar — only redraw on full redraw ────────────
     // The tab bar only changes when switching tabs, which sets fullRedraw.

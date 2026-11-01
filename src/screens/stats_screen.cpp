@@ -1,7 +1,10 @@
 #include "stats_screen.h"
 #include "../config.h"
 #include "../colors.h"
+#include "../pass_text.h"
 #include <cmath>
+#include <string.h>
+#include <time.h>
 
 // ─── Layout Constants ───────────────────────────────────
 static const int STAT_TITLE_Y = 20;
@@ -59,6 +62,43 @@ static const char* getVisibilityLabel(const String &visibility) {
     return "UNKNOWN";
 }
 
+// ─── Next Pass Strip (bottom of the screen) ─────────────
+static const int PASS_DIVIDER_Y = 348;
+static const int PASS_TITLE_Y   = 356;
+static const int PASS_LINE1_Y   = 374;
+static const int PASS_LINE2_Y   = 404;
+
+static void drawPassStrip(LGFX &lcd, const AppState &state, bool fullRedraw) {
+    static PassSummaryText last;
+    PassSummaryText txt;
+    passSummary(state, time(nullptr), txt);
+
+    // Content changes at most once a minute — only repaint when it does
+    if (!fullRedraw && memcmp(&txt, &last, sizeof(txt)) == 0) return;
+    last = txt;
+
+    lcd.fillRect(0, PASS_DIVIDER_Y, DISPLAY_WIDTH, MAP_AREA_HEIGHT - PASS_DIVIDER_Y, COL_BG);
+    lcd.drawLine(LEFT_COL_X, PASS_DIVIDER_Y, DISPLAY_WIDTH - LEFT_COL_X, PASS_DIVIDER_Y,
+                 COL_DIVIDER);
+
+    lcd.setTextDatum(TL_DATUM);
+    lcd.setTextColor(COL_STAT_LABEL);
+    lcd.setFont(&fonts::Font2);
+    lcd.drawString(txt.title, LEFT_COL_X, PASS_TITLE_Y);
+
+    // Large line; fall back to the small font if it doesn't fit
+    const int maxW = DISPLAY_WIDTH - 2 * LEFT_COL_X;
+    lcd.setTextColor(COL_TEXT_ACCENT);
+    lcd.setFont(&fonts::Font4);
+    if (lcd.textWidth(txt.line1) > maxW) lcd.setFont(&fonts::Font2);
+    lcd.drawString(txt.line1, LEFT_COL_X, PASS_LINE1_Y);
+
+    lcd.setTextColor(COL_TEXT_DIM);
+    lcd.setFont(&fonts::Font2);
+    lcd.drawString(txt.line2, LEFT_COL_X, PASS_LINE2_Y);
+    lcd.setFont(&fonts::Font0);
+}
+
 void renderStatsScreen(LGFX &lcd, const AppState &state, bool fullRedraw) {
     // Title — only on full redraw (it never changes)
     if (fullRedraw) {
@@ -70,6 +110,8 @@ void renderStatsScreen(LGFX &lcd, const AppState &state, bool fullRedraw) {
         // Horizontal divider
         lcd.drawLine(0, DIVIDER_Y, DISPLAY_WIDTH, DIVIDER_Y, COL_DIVIDER);
     }
+
+    drawPassStrip(lcd, state, fullRedraw);
 
     if (!state.position.valid) {
         lcd.setTextColor(COL_TEXT_DIM);

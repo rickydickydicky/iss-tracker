@@ -58,3 +58,7 @@
 #define COL_CREW_ISS        0x07FF  // Cyan — ISS crew
 #define COL_CREW_OTHER      0x8410  // Grey — other craft
 #define COL_CREW_CRAFT_BG   0x0861  // Dark badge background
+
+// ─── Pass Alert Banner ──────────────────────────────────
+#define COL_ALERT_BG        0xFEA0  // Gold — same as coastlines
+#define COL_ALERT_TEXT      0x0000  // Black on gold
