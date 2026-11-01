@@ -1,0 +1,7 @@
+{
+  "name": "orbit",
+  "version": "1.0.0",
+  "description": "Framework-free SGP4 propagation, TLE parsing and satellite pass prediction (near-earth only). Shared by the ESP32 firmware and the native unit tests.",
+  "frameworks": "*",
+  "platforms": "*"
+}
