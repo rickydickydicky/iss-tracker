@@ -9,6 +9,8 @@
 // ─── API Endpoints ──────────────────────────────────────
 #define API_ISS_POSITION  "https://api.wheretheiss.at/v1/satellites/25544"
 #define API_ISS_TLE       "https://api.wheretheiss.at/v1/satellites/25544/tles"
+// Fallback TLE source (plain-text 3-line format)
+#define API_ISS_TLE_FALLBACK "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
 // Primary: corquaid's maintained JSON (updated with each launch/landing)
 #define API_ASTROS         "https://corquaid.github.io/international-space-station-APIs/JSON/people-in-space.json"
 // Fallback: original Open Notify (unreliable, often down)
@@ -19,11 +21,21 @@
 // ─── Poll Intervals (ms) ────────────────────────────────
 #define POLL_POSITION_MS   10000    // 10 seconds (respect rate limit)
 #define POLL_CREW_MS       21600000 // 6 hours
-#define POLL_TLE_MS        86400000 // 24 hours
+#define POLL_TLE_MS        43200000 // 12 hours (ISS reboosts make old TLEs drift)
+#define POLL_TLE_RETRY_MS  300000   // 5 minutes after a failed TLE fetch
 
 // ─── Home Location (for pass predictions) ───────────────
 #define HOME_LAT  -37.8136   // Melbourne, AU
 #define HOME_LON  144.9631
+#define HOME_ALT_M  0.0      // metres above sea level (small effect on passes)
+
+// ─── Pass Prediction ────────────────────────────────────
+#define PASS_MIN_ELEVATION_DEG 10.0  // a "pass" = ISS above this elevation
+#define PASS_SUN_MAX_ALT_DEG   -6.0  // sky dark enough to see it (civil twilight)
+#define PASS_PREDICT_HOURS     48    // look-ahead window
+#define PASS_MAX_COUNT         12    // passes kept in memory
+#define PASS_ALERT_LEAD_S      300   // alert banner/wake this long before a visible pass
+#define TLE_MAX_AGE_DAYS       7.0   // refuse to predict from older elements
 
 // ─── Display ────────────────────────────────────────────
 // Waveshare ESP32-S3-Touch-LCD-4.3: 800x480 RGB LCD

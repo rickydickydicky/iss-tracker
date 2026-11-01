@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <orbit_tle.h>
 
 bool fetchIssPosition(IssPosition &pos) {
     HTTPClient http;
@@ -416,4 +417,88 @@ bool fetchAvatarImage(const char* url, uint8_t** outData, size_t* outSize) {
     *outSize = (size_t)totalRead;
     LOG_I("[Avatar] Downloaded %d bytes from %.50s...", totalRead, url);
     return true;
+}
+
+// ═══════════════════════════════════════════════════════
+//  ISS Two-Line Elements (for pass prediction)
+// ═══════════════════════════════════════════════════════
+
+static const int MAX_TLE_RESPONSE = 4096;   // real responses are ~400 bytes
+
+// GET a small text body. Rejects oversized responses before reading them.
+static bool httpGetSmall(const char* url, String &body) {
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(8000);
+    int code = http.GET();
+    if (code != 200) {
+        LOG_E("[TLE] HTTP %d from %s", code, url);
+        http.end();
+        return false;
+    }
+    int len = http.getSize();   // -1 if chunked / unknown
+    if (len > MAX_TLE_RESPONSE) {
+        LOG_E("[TLE] Response too large (%d bytes) from %s", len, url);
+        http.end();
+        return false;
+    }
+    body = http.getString();
+    http.end();
+    if ((int)body.length() > MAX_TLE_RESPONSE) {
+        LOG_E("[TLE] Response too large (%u bytes) from %s", body.length(), url);
+        return false;
+    }
+    return true;
+}
+
+static bool validTle(const char* l1, const char* l2, const char* source) {
+    orbit::Tle t;
+    orbit::TleError err = orbit::tleParse(l1, l2, t);
+    if (err != orbit::TLE_OK) {
+        LOG_E("[TLE] Invalid TLE from %s: %s", source, orbit::tleErrorString(err));
+        return false;
+    }
+    if (t.satnum != 25544) {
+        LOG_E("[TLE] Unexpected satellite %ld from %s", t.satnum, source);
+        return false;
+    }
+    return true;
+}
+
+bool fetchIssTle(char* line1, char* line2, size_t bufSize) {
+    if (bufSize < 70) return false;
+    String body;
+
+    // Primary: wheretheiss.at JSON {"line1": "...", "line2": "...", ...}
+    if (httpGetSmall(API_ISS_TLE, body)) {
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, body);
+        if (err) {
+            LOG_E("[TLE] JSON parse error: %s", err.c_str());
+        } else {
+            const char* l1 = doc["line1"] | "";
+            const char* l2 = doc["line2"] | "";
+            if (validTle(l1, l2, "wheretheiss.at")) {
+                strlcpy(line1, l1, bufSize);
+                strlcpy(line2, l2, bufSize);
+                LOG_I("[TLE] Updated from wheretheiss.at");
+                return true;
+            }
+        }
+    }
+
+    // Fallback: CelesTrak 3-line text
+    LOG_W("[TLE] Primary source failed, trying CelesTrak...");
+    if (httpGetSmall(API_ISS_TLE_FALLBACK, body)) {
+        char l1[80], l2[80];
+        if (orbit::tleFindLines(body.c_str(), l1, l2, sizeof(l1)) &&
+            validTle(l1, l2, "CelesTrak")) {
+            strlcpy(line1, l1, bufSize);
+            strlcpy(line2, l2, bufSize);
+            LOG_I("[TLE] Updated from CelesTrak");
+            return true;
+        }
+        LOG_E("[TLE] No valid TLE in CelesTrak response");
+    }
+    return false;
 }

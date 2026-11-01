@@ -6,6 +6,10 @@
 #include "api_client.h"
 #include "settings.h"
 #include "screens/screen_manager.h"
+#include <orbit_alert.h>  // formatLocalDayTime for logs
+#include <orbit_pass.h>
+#include <orbit_sgp4.h>
+#include <orbit_tle.h>
 
 // ─── Global State ───────────────────────────────────────
 AppState appState;
@@ -19,9 +23,116 @@ static SemaphoreHandle_t stateMutex;
 static IssPosition  shadowPosition;
 static CrewData     shadowCrew;
 
+// Pass predictions: written by the network task *under stateMutex*,
+// merged into appState by the main loop (also under the mutex).
+static PassPredictions shadowPasses;
+
 // ─── Flags set by network task, read by main loop ───────
 static volatile bool newPositionReady = false;
 static volatile bool newCrewReady     = false;
+static volatile bool newPassesReady   = false;
+
+// ─── Pass prediction (network task only) ────────────────
+// Unix times before this mean the clock hasn't been set by NTP yet.
+static const time_t MIN_VALID_UNIX = 1700000000;  // Nov 2023
+
+static void yieldToRtos(void*) {
+    vTaskDelay(1);  // let the idle task run (task watchdog) during long searches
+}
+
+// Recompute predictions when the elements change, the first predicted
+// pass is over, or periodically. Returns true if shadowPasses was updated.
+static bool updatePassPredictions(const orbit::Sgp4* sat, bool tleChanged) {
+    static PassPredictions work;           // static: ~1 KB, keep it off the stack
+    static bool haveResult = false;
+    static int64_t lastRun = 0;
+
+    const time_t now = time(nullptr);
+    PassStatus status;
+
+    if (!sat) {
+        status = PASS_STATUS_NO_TLE;
+    } else if (now < MIN_VALID_UNIX) {
+        status = PASS_STATUS_NO_TIME;
+    } else {
+        // Decide whether the existing prediction is still good
+        const int64_t sinceRun = (int64_t)now - lastRun;
+        bool due = tleChanged || !haveResult || sinceRun > 6 * 3600;
+        if (work.status == PASS_STATUS_OK) {
+            if (work.count > 0 && now > work.passes[0].los) due = true;  // first pass over
+            if (work.count == 0 && sinceRun > 3600) due = true;
+        } else if (sinceRun > 600) {
+            due = true;   // retry after stale elements / errors (cheap check first)
+        }
+        if (!due) return false;
+
+        const double ageDays = orbit::unixToJd((double)now) - sat->epochJd;
+        if (ageDays > TLE_MAX_AGE_DAYS) {
+            LOG_W("[Pass] TLE is %.1f days old — not predicting", ageDays);
+            lastRun = now;
+            status = PASS_STATUS_STALE_TLE;
+        } else {
+            float homeLat = HOME_LAT, homeLon = HOME_LON;
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+                homeLat = appState.settings.homeLat;
+                homeLon = appState.settings.homeLon;
+                xSemaphoreGive(stateMutex);
+            }
+            orbit::Observer obs;
+            orbit::observerInit(obs, homeLat, homeLon, HOME_ALT_M / 1000.0);
+            orbit::PassOptions opt;
+            opt.minElevationDeg = PASS_MIN_ELEVATION_DEG;
+            opt.maxSunAltDeg    = PASS_SUN_MAX_ALT_DEG;
+
+            unsigned long t0 = millis();
+            orbit::Sgp4Error err = orbit::SGP4_OK;
+            int n = orbit::predictPasses(*sat, obs, (int64_t)now,
+                                         (int64_t)now + PASS_PREDICT_HOURS * 3600,
+                                         opt, work.passes, PASS_MAX_COUNT,
+                                         yieldToRtos, nullptr, &err);
+            unsigned long dt = millis() - t0;
+            lastRun = now;
+            haveResult = true;
+            work.computedAt = now;
+            work.tleEpochJd = sat->epochJd;
+            if (n < 0) {
+                LOG_E("[Pass] SGP4 error %d during prediction", (int)err);
+                work.count = 0;
+                status = PASS_STATUS_ERROR;
+            } else {
+                work.count = n;
+                status = PASS_STATUS_OK;
+                int visible = 0;
+                for (int i = 0; i < n; i++) if (work.passes[i].visible) visible++;
+                LOG_I("[Pass] %d passes (%d visible) in next %dh, computed in %lu ms "
+                      "(TLE age %.1f d)", n, visible, PASS_PREDICT_HOURS, dt, ageDays);
+                for (int i = 0; i < n; i++) {
+                    const orbit::Pass &p = work.passes[i];
+                    char when[24];
+                    orbit::formatLocalDayTime(p.aos, now, when, sizeof(when));
+                    LOG_I("[Pass]   %s  %s->%s  max %.0f deg%s", when,
+                          orbit::compassPoint8(p.aosAzDeg), orbit::compassPoint8(p.losAzDeg),
+                          p.maxElDeg, p.visible ? "  VISIBLE" : "");
+                }
+            }
+        }
+    }
+
+    if (status != PASS_STATUS_OK) {
+        if (haveResult && work.status == status) return false;  // unchanged
+        work.count = 0;
+        haveResult = true;
+    }
+    work.status = status;
+
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100))) {
+        shadowPasses = work;
+        newPassesReady = true;
+        xSemaphoreGive(stateMutex);
+        return true;
+    }
+    return false;
+}
 
 // ─── Network Task (runs on Core 0) ─────────────────────
 static void networkTask(void *param) {
@@ -32,6 +143,12 @@ static void networkTask(void *param) {
     // ── Enrichment state ─────────────────────────
     bool enrichmentDone  = false;   // Bio/nationality fetched from SpaceDevs
     int  avatarProgress  = 0;       // Next crew index to download avatar for
+
+    // ── Orbital elements for pass prediction ─────
+    static orbit::Sgp4 issSat;      // static: keep ~260 bytes off the task stack
+    bool tleValid      = false;
+    bool tleAttempted  = false;
+    unsigned long lastTlePoll = 0;
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     LOG_I("[Net] Network task started on Core %d", xPortGetCoreID());
@@ -106,6 +223,31 @@ static void networkTask(void *param) {
             }
         }
 
+        // ── Orbital elements (TLE) ───────────────────
+        unsigned long tleInterval = tleValid ? POLL_TLE_MS : POLL_TLE_RETRY_MS;
+        bool tleChanged = false;
+        if (!tleAttempted || now - lastTlePoll >= tleInterval) {
+            tleAttempted = true;
+            lastTlePoll  = now;
+            char l1[72], l2[72];
+            if (fetchIssTle(l1, l2, sizeof(l1))) {
+                orbit::Tle tle;
+                orbit::Sgp4 sat;
+                if (orbit::tleParse(l1, l2, tle) == orbit::TLE_OK &&
+                    orbit::sgp4Init(tle, sat) == orbit::SGP4_OK) {
+                    issSat     = sat;
+                    tleValid   = true;
+                    tleChanged = true;
+                    LOG_I("[Net] TLE epoch JD %.5f", tle.epochJd);
+                } else {
+                    LOG_E("[Net] TLE rejected by SGP4 init");
+                }
+            }
+        }
+
+        // ── Pass predictions (cheap no-op unless due) ──
+        updatePassPredictions(tleValid ? &issSat : nullptr, tleChanged);
+
         // ── Crew enrichment (bios, agencies, nationalities) ──
         if (shadowCrew.valid && !enrichmentDone) {
             LOG_I("[Net] Starting crew enrichment...");
@@ -164,6 +306,16 @@ static void mergeNetworkData() {
             appState.lastCrewUpdate = millis();
             newCrewReady = false;
             xSemaphoreGive(stateMutex);
+        }
+    }
+
+    if (newPassesReady) {
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10))) {
+            appState.passes = shadowPasses;
+            newPassesReady = false;
+            xSemaphoreGive(stateMutex);
+            // Static screens only repaint on a full redraw
+            if (appState.activeScreen == SCREEN_SETTINGS) screenForceRedraw();
         }
     }
 }

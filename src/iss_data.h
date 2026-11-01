@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <orbit_pass.h>
 #include "config.h"
 
 // ─── ISS Position ───────────────────────────────────────
@@ -60,6 +61,24 @@ struct CrewData {
     bool valid;
 };
 
+// ─── Pass Predictions ───────────────────────────────────
+// Computed on the network task from the ISS TLE and the home location.
+enum PassStatus : uint8_t {
+    PASS_STATUS_NO_TLE = 0,     // orbital elements not fetched yet
+    PASS_STATUS_NO_TIME,        // waiting for NTP
+    PASS_STATUS_STALE_TLE,      // elements older than TLE_MAX_AGE_DAYS
+    PASS_STATUS_ERROR,          // SGP4 failed
+    PASS_STATUS_OK,
+};
+
+struct PassPredictions {
+    PassStatus  status;
+    int         count;                      // valid entries in passes[]
+    orbit::Pass passes[PASS_MAX_COUNT];     // sorted by AOS (unix seconds)
+    int64_t     computedAt;                 // unix time of the prediction run
+    double      tleEpochJd;                 // epoch of the elements used
+};
+
 // ─── User Settings (persisted in NVS) ───────────────────
 struct UserSettings {
     // Display sleep
@@ -67,7 +86,7 @@ struct UserSettings {
     uint8_t sleepStartHour;   // 0-23, e.g. 22 = 10 PM
     uint8_t sleepEndHour;     // 0-23, e.g. 7 = 7 AM
 
-    // Pass prediction (placeholder — wired up when predictor is built)
+    // Pass alerts: banner (and wake from display sleep) before visible passes
     bool passNotifyEnabled;
 
     // Home location
@@ -89,6 +108,7 @@ struct AppState {
     GroundTrack track;
     CrewData crew;
     UserSettings settings;
+    PassPredictions passes;
     Screen activeScreen;
     bool wifiConnected;
     bool apiError;
